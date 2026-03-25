@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import RFB from '@novnc/novnc/lib/rfb';
+import { default as RFB } from '@novnc/novnc/lib/rfb';
 import { X, Terminal, MonitorPlay } from 'lucide-react';
 import { apiCall } from '../lib/api';
 
