@@ -1,0 +1,150 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-brand-50: #f0f9ff;
+  --color-brand-100: #e0f2fe;
+  --color-brand-500: #0ea5e9;
+  --color-brand-600: #0284c7;
+  --color-brand-700: #0369a1;
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 font-sans antialiased selection:bg-sky-100;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold tracking-tight text-slate-900;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-white border border-slate-200 rounded-xl shadow-sm;
+  }
+
+  .glass-card {
+    @apply bg-white border border-slate-200 rounded-lg shadow-sm transition-all duration-200 hover:border-sky-500 hover:shadow-md;
+  }
+
+  .btn-primary {
+    @apply px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-medium transition-all duration-200 shadow-sm active:scale-95 disabled:opacity-50 disabled:pointer-events-none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 rounded-lg font-medium transition-all duration-200 border border-slate-200 shadow-sm active:scale-95;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  .btn-ghost {
+    @apply p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-all duration-200;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .input-field {
+    @apply w-full bg-white border border-slate-300 rounded-lg px-4 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 transition-all duration-200 placeholder:text-slate-400;
+  }
+
+  .input-label {
+    @apply block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider;
+  }
+
+  .badge-success {
+    @apply bg-emerald-50 text-emerald-700 border border-emerald-200;
+  }
+
+  .badge-warning {
+    @apply bg-amber-50 text-amber-700 border border-amber-200;
+  }
+
+  .badge-error {
+    @apply bg-rose-50 text-rose-700 border border-rose-200;
+  }
+
+  .badge-info {
+    @apply bg-sky-50 text-sky-700 border border-sky-200;
+  }
+
+  .badge-neutral {
+    @apply bg-slate-100 text-slate-600 border border-slate-200;
+  }
+
+  .data-table {
+    @apply w-full text-left border-collapse;
+  }
+
+  .data-table th {
+    @apply px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest border-b border-slate-200 bg-slate-50/50;
+  }
+
+  .data-table td {
+    @apply px-4 py-4 text-sm border-b border-slate-100 align-middle;
+  }
+
+  .data-table tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .data-table tr:hover td {
+    @apply bg-slate-50/80;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-slate-50;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-300 rounded-full hover:bg-slate-400 transition-colors;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Tab Active State */
+.tab-active {
+  @apply bg-sky-50 text-sky-600 border-sky-200;
+}
+
+/* Sidebar */
+.sidebar {
+  @apply bg-slate-900 border-r border-slate-800 flex flex-col h-screen sticky top-0;
+}
+
+.sidebar-item {
+  @apply flex items-center gap-3 px-4 py-2.5 text-sm font-medium text-slate-400 rounded-lg transition-all duration-200 hover:text-white hover:bg-slate-800;
+}
+
+.sidebar-item.active {
+  @apply text-white bg-sky-600 shadow-lg shadow-sky-900/20;
+}

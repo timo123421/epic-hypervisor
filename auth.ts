@@ -1,0 +1,63 @@
+import jwt from 'jsonwebtoken';
+import { Request, Response, NextFunction } from 'express';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { authenticator } = require('otplib');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'nova-default-secret-key-change-me';
+
+export interface AuthRequest extends Request {
+  user?: any;
+}
+
+export function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    res.status(401).json({ error: 'Authentication token required' });
+    return;
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      res.status(403).json({ error: 'Invalid or expired token' });
+      return;
+    }
+    req.user = user;
+    next();
+  });
+}
+
+export function authorize(permissions: string[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    
+    // Admin has all permissions
+    if (req.user.role === 'admin') return next();
+    
+    const userPermissions = req.user.permissions || [];
+    const hasPermission = permissions.every(p => userPermissions.includes(p));
+    
+    if (!hasPermission) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+}
+
+export function generateToken(payload: object): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
+}
+
+export function verify2FA(token: string, secret: string): boolean {
+  return authenticator.verify({ token, secret });
+}
+
+export function generate2FASecret() {
+  return authenticator.generateSecret();
+}
+
+export function get2FAQRCode(user: string, secret: string) {
+  return authenticator.keyuri(user, 'Project Nova', secret);
+}

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  nova:
+    build: .
+    container_name: project-nova
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      # Uncomment the line below and add your Tailscale Auth Key to automatically join your Tailnet
+      # - TAILSCALE_AUTH_KEY=tskey-auth-xxxxxxxxxxxxxxxxx
+    volumes:
+      # Mount the libvirt socket so Nova can manage the host's VMs
+      - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
+      # Persist Nova's SQLite database
+      - ./data:/app/data
+      # Persist Tailscale state so it doesn't need to re-authenticate on restart
+      - tailscale_data:/var/lib/tailscale
+    cap_add:
+      # Required for Tailscale to create the tun interface and manage routing
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      # Required for Tailscale virtual network interface
+      - /dev/net/tun:/dev/net/tun
+
+volumes:
+  tailscale_data:
