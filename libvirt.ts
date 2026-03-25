@@ -52,20 +52,26 @@ export async function listVMs() {
       }
     }
     return vms;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to list VMs:', error);
-    throw new Error('Failed to list VMs');
+    if (error.stderr) console.error('virsh stderr:', error.stderr);
+    throw new Error(`Failed to list VMs: ${error.message || error}`);
   }
 }
 
 export async function createVM(config: any) {
   try {
+    // Default osVariant to 'generic' if not provided to avoid virt-install errors
+    const osVariant = config.osVariant || 'generic';
+    
     // In a real environment, you'd generate an XML config file and use 'virsh define'
     // For now, we'll simulate the creation command
-    const { stdout } = await execAsync(`virt-install --name ${config.name} --memory ${config.memory} --vcpus ${config.vcpus} --disk size=10 --os-variant ${config.osVariant} --noautoconsole`);
+    const { stdout } = await execAsync(`virt-install --name ${config.name} --memory ${config.memory} --vcpus ${config.vcpus} --disk size=10 --os-variant ${osVariant} --noautoconsole`);
     const { stdout: uuid } = await execAsync(`virsh domuuid ${config.name}`);
     return { success: true, output: stdout, uuid: uuid.trim() };
   } catch (error: any) {
+    console.error('Error in createVM:', error);
+    if (error.stderr) console.error('virt-install stderr:', error.stderr);
     throw new Error(`Failed to create VM: ${error.message}`);
   }
 }
@@ -75,6 +81,8 @@ export async function startVM(uuid: string) {
     await execAsync(`virsh start ${uuid}`);
     return { success: true };
   } catch (error: any) {
+    console.error(`Error in startVM for ${uuid}:`, error);
+    if (error.stderr) console.error('virsh stderr:', error.stderr);
     throw new Error(`Failed to start VM: ${error.message}`);
   }
 }
@@ -84,6 +92,8 @@ export async function stopVM(uuid: string) {
     await execAsync(`virsh shutdown ${uuid}`);
     return { success: true };
   } catch (error: any) {
+    console.error(`Error in stopVM for ${uuid}:`, error);
+    if (error.stderr) console.error('virsh stderr:', error.stderr);
     throw new Error(`Failed to stop VM: ${error.message}`);
   }
 }
@@ -93,6 +103,8 @@ export async function forceStopVM(uuid: string) {
     await execAsync(`virsh destroy ${uuid}`);
     return { success: true };
   } catch (error: any) {
+    console.error(`Error in forceStopVM for ${uuid}:`, error);
+    if (error.stderr) console.error('virsh stderr:', error.stderr);
     throw new Error(`Failed to force stop VM: ${error.message}`);
   }
 }
@@ -103,6 +115,8 @@ export async function deleteVM(uuid: string) {
     await execAsync(`virsh undefine ${uuid} --remove-all-storage`);
     return { success: true };
   } catch (error: any) {
+    console.error(`Error in deleteVM for ${uuid}:`, error);
+    if (error.stderr) console.error('virsh stderr:', error.stderr);
     throw new Error(`Failed to delete VM: ${error.message}`);
   }
 }
@@ -112,6 +126,8 @@ export async function renameVM(uuid: string, newName: string) {
     await execAsync(`virsh domrename ${uuid} ${newName}`);
     return { success: true };
   } catch (error: any) {
+    console.error(`Error in renameVM for ${uuid}:`, error);
+    if (error.stderr) console.error('virsh stderr:', error.stderr);
     throw new Error(`Failed to rename VM: ${error.message}`);
   }
 }
@@ -122,6 +138,8 @@ export async function cloneVM(uuid: string, newName: string) {
     const { stdout: newUuid } = await execAsync(`virsh domuuid ${newName}`);
     return { success: true, uuid: newUuid.trim() };
   } catch (error: any) {
+    console.error(`Error in cloneVM for ${uuid}:`, error);
+    if (error.stderr) console.error('virt-clone stderr:', error.stderr);
     throw new Error(`Failed to clone VM: ${error.message}`);
   }
 }
