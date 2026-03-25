@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { apiCall } from '../lib/api';
-import { Box, Play, Square, RefreshCw, AlertTriangle, Trash2, Terminal, Cpu, MemoryStick } from 'lucide-react';
+import { Box, Play, Square, RefreshCw, AlertTriangle, Trash2, Terminal, Cpu, MemoryStick, Plus, X, Settings } from 'lucide-react';
+import ConfigModal from './ConfigModal';
 
 interface Container {
   name: string;
-  state: string;
-  ipv4?: string;
+  status: string;
+  ip?: string;
   ram?: string;
   pid?: string;
 }
@@ -14,6 +15,9 @@ export default function Containers() {
   const [containers, setContainers] = useState<Container[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [editingConfig, setEditingConfig] = useState<string | null>(null);
 
   const fetchContainers = async () => {
     setLoading(true);
@@ -43,15 +47,38 @@ export default function Containers() {
     }
   };
 
-  const getStatusBadge = (state: string) => {
-    const s = state.toLowerCase();
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget as HTMLFormElement);
+    const name = formData.get('name') as string;
+    const dist = formData.get('dist') as string;
+    const release = formData.get('release') as string;
+    const arch = formData.get('arch') as string;
+
+    setCreating(true);
+    try {
+      await apiCall('/lxc', {
+        method: 'POST',
+        body: JSON.stringify({ name, dist, release, arch }),
+      });
+      setShowCreateModal(false);
+      fetchContainers();
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const getStatusBadge = (status: string = '') => {
+    const s = (status || '').toLowerCase();
     if (s === 'running') {
       return <span className="badge badge-success"><span className="w-1.5 h-1.5 rounded-full bg-green-500 mr-1.5 animate-pulse"></span>Running</span>;
     }
     if (s === 'stopped') {
       return <span className="badge badge-neutral"><span className="w-1.5 h-1.5 rounded-full bg-slate-400 mr-1.5"></span>Stopped</span>;
     }
-    return <span className="badge badge-warning"><span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mr-1.5"></span>{state}</span>;
+    return <span className="badge badge-warning"><span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mr-1.5"></span>{status || 'Unknown'}</span>;
   };
 
   return (
@@ -63,8 +90,8 @@ export default function Containers() {
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
-          <button className="btn-primary opacity-50 cursor-not-allowed" title="Not available in this environment">
-            <Box className="w-4 h-4" />
+          <button onClick={() => setShowCreateModal(true)} className="btn-primary">
+            <Plus className="w-4 h-4" />
             Create CT
           </button>
         </div>
@@ -89,9 +116,8 @@ export default function Containers() {
             <thead>
               <tr>
                 <th>Container Name</th>
-                <th>State</th>
+                <th>Status</th>
                 <th>IP Address</th>
-                <th>PID</th>
                 <th className="text-right">Actions</th>
               </tr>
             </thead>
@@ -101,25 +127,42 @@ export default function Containers() {
                   <td>
                     <div className="font-medium text-slate-900">{ct.name}</div>
                   </td>
-                  <td>{getStatusBadge(ct.state)}</td>
+                  <td>{getStatusBadge(ct.status)}</td>
                   <td>
-                    <div className="text-sm text-slate-700 font-mono">{ct.ipv4 || '-'}</div>
-                  </td>
-                  <td>
-                    <div className="text-sm text-slate-700 font-mono">{ct.pid || '-'}</div>
+                    <div className="text-sm text-slate-700 font-mono">{ct.ip || '-'}</div>
                   </td>
                   <td>
                     <div className="flex items-center justify-end gap-2">
-                      {ct.state.toLowerCase() === 'running' ? (
+                      <button onClick={() => setEditingConfig(ct.name)} className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors" title="Edit Config">
+                        <Settings className="w-4 h-4" />
+                      </button>
+                      {(ct.status || '').toLowerCase() === 'running' ? (
                         <>
                           <button onClick={() => handleAction(ct.name, 'stop')} className="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" title="Stop">
                             <Square className="w-4 h-4" />
                           </button>
                         </>
                       ) : (
-                        <button onClick={() => handleAction(ct.name, 'start')} className="p-1.5 text-slate-500 hover:text-green-600 hover:bg-green-50 rounded transition-colors" title="Start">
-                          <Play className="w-4 h-4" />
-                        </button>
+                        <>
+                          <button onClick={() => handleAction(ct.name, 'start')} className="p-1.5 text-slate-500 hover:text-green-600 hover:bg-green-50 rounded transition-colors" title="Start">
+                            <Play className="w-4 h-4" />
+                          </button>
+                          <button onClick={async () => {
+                            if (confirm(`Are you sure you want to delete container ${ct.name}?`)) {
+                              // Optimistic UI update
+                              setContainers(prev => prev.filter(c => c.name !== ct.name));
+                              
+                              try {
+                                await apiCall(`/lxc/${ct.name}`, { method: 'DELETE' });
+                              } catch (err: any) {
+                                alert(`Failed to delete container: ${err.message}`);
+                                fetchContainers();
+                              }
+                            }
+                          }} className="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </>
                       )}
                     </div>
                   </td>
@@ -129,6 +172,58 @@ export default function Containers() {
           </table>
         )}
       </div>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-xl font-bold text-slate-900">Create LXC Container</h3>
+              <button onClick={() => setShowCreateModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-6 h-6" /></button>
+            </div>
+            <form onSubmit={handleCreate} className="p-6 space-y-4">
+              <div>
+                <label className="input-label">Container Name</label>
+                <input name="name" type="text" className="input-field" placeholder="ct-01" required />
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="input-label">Distribution</label>
+                  <select name="dist" className="input-field">
+                    <option value="ubuntu">Ubuntu</option>
+                    <option value="debian">Debian</option>
+                    <option value="alpine">Alpine</option>
+                    <option value="centos">CentOS</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="input-label">Release</label>
+                  <input name="release" type="text" className="input-field" placeholder="jammy / bullseye" defaultValue="jammy" required />
+                </div>
+              </div>
+
+              <div>
+                <label className="input-label">Architecture</label>
+                <select name="arch" className="input-field">
+                  <option value="amd64">amd64</option>
+                  <option value="arm64">arm64</option>
+                </select>
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary flex-1">Cancel</button>
+                <button type="submit" disabled={creating} className="btn-primary flex-1">
+                  {creating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Box className="w-4 h-4" />}
+                  {creating ? 'Creating...' : 'Create Container'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {editingConfig && (
+        <ConfigModal type="lxc" id={editingConfig} onClose={() => setEditingConfig(null)} />
+      )}
     </>
   );
 }

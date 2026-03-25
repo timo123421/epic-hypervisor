@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { apiCall } from '../lib/api';
-import { Play, Square, RefreshCw, HardDrive, AlertTriangle, Database, ChevronDown, ChevronRight, FileUp } from 'lucide-react';
+import { Play, Square, RefreshCw, HardDrive, AlertTriangle, Database, ChevronDown, ChevronRight, FileUp, Trash2 } from 'lucide-react';
 
 interface StoragePool {
   name: string;
@@ -13,9 +13,19 @@ interface StorageVolume {
   path: string;
 }
 
+interface PhysicalDisk {
+  name: string;
+  size: string;
+  model: string;
+  type: string;
+  tran: string;
+}
+
 export default function Storage() {
+  const [activeSubTab, setActiveSubTab] = useState<'pools' | 'disks'>('pools');
   const [pools, setPools] = useState<StoragePool[]>([]);
   const [volumes, setVolumes] = useState<Record<string, StorageVolume[]>>({});
+  const [disks, setDisks] = useState<PhysicalDisk[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [expandedPools, setExpandedPools] = useState<Set<string>>(new Set());
@@ -24,6 +34,9 @@ export default function Storage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isFormatModalOpen, setIsFormatModalOpen] = useState(false);
+  const [selectedDisk, setSelectedDisk] = useState<PhysicalDisk | null>(null);
+  const [fsType, setFsType] = useState('ext4');
   const [newPool, setNewPool] = useState({ name: '', type: 'dir', target: '', source: '', vgName: '', devices: '' });
 
   const fetchPools = async () => {
@@ -55,6 +68,18 @@ export default function Storage() {
     }
   };
 
+  const fetchDisks = async () => {
+    setLoading(true);
+    try {
+      const data = await apiCall('/storage/disks');
+      setDisks(data.disks || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch physical disks');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleCreatePool = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -75,9 +100,30 @@ export default function Storage() {
     }
   };
 
+  const handleFormatDisk = async () => {
+    if (!selectedDisk) return;
+    setLoading(true);
+    try {
+      await apiCall(`/storage/disks/${selectedDisk.name}/format`, {
+        method: 'POST',
+        body: JSON.stringify({ fsType })
+      });
+      setIsFormatModalOpen(false);
+      fetchDisks();
+    } catch (err: any) {
+      setError(err.message || 'Failed to format disk');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    fetchPools();
-  }, []);
+    if (activeSubTab === 'pools') {
+      fetchPools();
+    } else {
+      fetchDisks();
+    }
+  }, [activeSubTab]);
 
   const handleAction = async (name: string, action: 'start' | 'stop') => {
     try {
@@ -106,7 +152,7 @@ export default function Storage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.name.toLowerCase().endsWith('.iso')) {
+    if (!(file.name || '').toLowerCase().endsWith('.iso')) {
       alert('Please select a valid .iso file');
       return;
     }
@@ -163,15 +209,16 @@ export default function Storage() {
     }
   };
 
-  const getStatusBadge = (state: string) => {
-    switch (state) {
+  const getStatusBadge = (state: string = '') => {
+    const s = (state || '').toLowerCase();
+    switch (s) {
       case 'active':
       case 'running':
         return <span className="badge badge-success"><span className="w-1.5 h-1.5 rounded-full bg-green-500 mr-1.5 animate-pulse"></span>Active</span>;
       case 'inactive':
         return <span className="badge badge-neutral"><span className="w-1.5 h-1.5 rounded-full bg-slate-400 mr-1.5"></span>Inactive</span>;
       default:
-        return <span className="badge badge-warning"><span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mr-1.5"></span>{state}</span>;
+        return <span className="badge badge-warning"><span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mr-1.5"></span>{state || 'Unknown'}</span>;
     }
   };
 
@@ -185,33 +232,52 @@ export default function Storage() {
         onChange={handleFileChange} 
       />
       <div className="flex justify-between items-center mb-6">
-        <p className="text-slate-500 text-sm">Manage storage pools and volumes.</p>
+        <div className="flex gap-4 border-b border-slate-200 w-full max-w-md">
+          <button 
+            onClick={() => setActiveSubTab('pools')}
+            className={`pb-2 px-4 text-sm font-medium transition-colors relative ${activeSubTab === 'pools' ? 'text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            Storage Pools
+            {activeSubTab === 'pools' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600"></div>}
+          </button>
+          <button 
+            onClick={() => setActiveSubTab('disks')}
+            className={`pb-2 px-4 text-sm font-medium transition-colors relative ${activeSubTab === 'disks' ? 'text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            Physical Disks
+            {activeSubTab === 'disks' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600"></div>}
+          </button>
+        </div>
         <div className="flex gap-3">
-          <button onClick={fetchPools} className="btn-secondary">
+          <button onClick={activeSubTab === 'pools' ? fetchPools : fetchDisks} className="btn-secondary">
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
-          <button onClick={() => setIsCreateModalOpen(true)} className="btn-secondary">
-            <Database className="w-4 h-4" />
-            Create Pool
-          </button>
-          <button 
-            onClick={handleUploadClick} 
-            className="btn-primary"
-            disabled={uploading}
-          >
-            {uploading ? (
-              <>
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                Uploading {uploadProgress}%
-              </>
-            ) : (
-              <>
-                <FileUp className="w-4 h-4" />
-                Upload ISO
-              </>
-            )}
-          </button>
+          {activeSubTab === 'pools' && (
+            <>
+              <button onClick={() => setIsCreateModalOpen(true)} className="btn-secondary">
+                <Database className="w-4 h-4" />
+                Create Pool
+              </button>
+              <button 
+                onClick={handleUploadClick} 
+                className="btn-primary"
+                disabled={uploading}
+              >
+                {uploading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Uploading {uploadProgress}%
+                  </>
+                ) : (
+                  <>
+                    <FileUp className="w-4 h-4" />
+                    Upload ISO
+                  </>
+                )}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -322,6 +388,54 @@ export default function Storage() {
         </div>
       )}
 
+      {isFormatModalOpen && selectedDisk && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <HardDrive className="w-5 h-5 text-indigo-600" />
+                Format Disk: {selectedDisk.name}
+              </h3>
+              <button onClick={() => setIsFormatModalOpen(false)} className="text-slate-400 hover:text-slate-600 transition-colors">
+                <AlertTriangle className="w-6 h-6 rotate-45" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
+                <div>
+                  <p className="font-bold mb-1 uppercase">Warning: Data Loss</p>
+                  Formatting this disk will permanently erase all data on it. This action cannot be undone.
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Filesystem Type</label>
+                <select
+                  className="input-field"
+                  value={fsType}
+                  onChange={(e) => setFsType(e.target.value)}
+                >
+                  <option value="ext4">ext4 (Standard Linux)</option>
+                  <option value="xfs">XFS (High Performance)</option>
+                  <option value="zfs">ZFS (Hyper-Converged)</option>
+                </select>
+              </div>
+              <div className="pt-4 flex gap-3">
+                <button onClick={() => setIsFormatModalOpen(false)} className="btn-secondary flex-1">
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleFormatDisk} 
+                  className="bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-lg font-medium transition-all shadow-sm flex items-center justify-center gap-2 flex-1"
+                >
+                  Format & Wipe
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-red-500" />
@@ -330,112 +444,186 @@ export default function Storage() {
       )}
 
       <div className="card">
-        {pools.length === 0 && !loading ? (
-          <div className="p-12 text-center text-slate-500">
-            <Database className="w-12 h-12 mx-auto mb-4 text-slate-300" />
-            <h3 className="text-lg font-medium text-slate-900 mb-1">No Storage Pools</h3>
-            <p className="text-sm">No storage pools have been configured on this node.</p>
-          </div>
-        ) : (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th className="w-8"></th>
-                <th>Pool Name</th>
-                <th>State</th>
-                <th>Autostart</th>
-                <th className="text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pools.map((pool) => (
-                <React.Fragment key={pool.name}>
-                  <tr className={expandedPools.has(pool.name) ? 'bg-slate-50' : ''}>
-                    <td>
-                      <button 
-                        onClick={() => togglePool(pool.name)}
-                        className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors"
-                        disabled={pool.state !== 'active'}
-                      >
-                        {pool.state === 'active' && (
-                          expandedPools.has(pool.name) ? (
-                            <ChevronDown className="w-4 h-4" />
+        {activeSubTab === 'pools' ? (
+          pools.length === 0 && !loading ? (
+            <div className="p-12 text-center text-slate-500">
+              <Database className="w-12 h-12 mx-auto mb-4 text-slate-300" />
+              <h3 className="text-lg font-medium text-slate-900 mb-1">No Storage Pools</h3>
+              <p className="text-sm">No storage pools have been configured on this node.</p>
+            </div>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th className="w-8"></th>
+                  <th>Pool Name</th>
+                  <th>State</th>
+                  <th>Autostart</th>
+                  <th className="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pools.map((pool) => (
+                  <React.Fragment key={pool.name}>
+                    <tr className={expandedPools.has(pool.name) ? 'bg-slate-50' : ''}>
+                      <td>
+                        <button 
+                          onClick={() => togglePool(pool.name)}
+                          className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors"
+                          disabled={pool.state !== 'active'}
+                        >
+                          {pool.state === 'active' && (
+                            expandedPools.has(pool.name) ? (
+                              <ChevronDown className="w-4 h-4" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4" />
+                            )
+                          )}
+                        </button>
+                      </td>
+                      <td>
+                        <div className="flex items-center gap-3">
+                          <Database className="w-5 h-5 text-slate-400" />
+                          <div className="font-medium text-slate-900">{pool.name}</div>
+                        </div>
+                      </td>
+                      <td>
+                        {getStatusBadge(pool.state)}
+                      </td>
+                      <td>
+                        <span className="text-sm text-slate-600 capitalize">{pool.autostart}</span>
+                      </td>
+                      <td>
+                        <div className="flex items-center justify-end gap-2">
+                          {pool.state === 'active' ? (
+                            <button onClick={() => handleAction(pool.name, 'stop')} className="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" title="Stop Pool">
+                              <Square className="w-4 h-4" />
+                            </button>
                           ) : (
-                            <ChevronRight className="w-4 h-4" />
-                          )
-                        )}
-                      </button>
-                    </td>
-                    <td>
-                      <div className="flex items-center gap-3">
-                        <Database className="w-5 h-5 text-slate-400" />
-                        <div className="font-medium text-slate-900">{pool.name}</div>
-                      </div>
-                    </td>
-                    <td>
-                      {getStatusBadge(pool.state)}
-                    </td>
-                    <td>
-                      <span className="text-sm text-slate-600 capitalize">{pool.autostart}</span>
-                    </td>
-                    <td>
-                      <div className="flex items-center justify-end gap-2">
-                        {pool.state === 'active' ? (
-                          <button onClick={() => handleAction(pool.name, 'stop')} className="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" title="Stop Pool">
-                            <Square className="w-4 h-4" />
-                          </button>
-                        ) : (
-                          <button onClick={() => handleAction(pool.name, 'start')} className="p-1.5 text-slate-500 hover:text-green-600 hover:bg-green-50 rounded transition-colors" title="Start Pool">
-                            <Play className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                  
-                  {expandedPools.has(pool.name) && pool.state === 'active' && (
-                    <tr>
-                      <td colSpan={5} className="p-0 border-b border-slate-200 bg-slate-50">
-                        <div className="pl-12 pr-4 py-4">
-                          <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-3">Volumes in {pool.name}</h4>
-                          
-                          {volumes[pool.name] && volumes[pool.name].length > 0 ? (
-                            <div className="bg-white border border-slate-200 rounded-md overflow-hidden">
-                              <table className="w-full text-sm text-left">
-                                <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
-                                  <tr>
-                                    <th className="px-4 py-2 font-medium">Volume Name</th>
-                                    <th className="px-4 py-2 font-medium">Path</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                  {volumes[pool.name].map((vol) => (
-                                    <tr key={vol.name} className="hover:bg-slate-50/50">
-                                      <td className="px-4 py-2">
-                                        <div className="flex items-center gap-2">
-                                          <HardDrive className="w-4 h-4 text-slate-400" />
-                                          <span className="font-medium text-slate-700">{vol.name}</span>
-                                        </div>
-                                      </td>
-                                      <td className="px-4 py-2 text-slate-500 font-mono text-xs">{vol.path}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          ) : (
-                            <div className="text-sm text-slate-500 italic py-2">
-                              No volumes found in this pool.
-                            </div>
+                            <>
+                              <button onClick={() => handleAction(pool.name, 'start')} className="p-1.5 text-slate-500 hover:text-green-600 hover:bg-green-50 rounded transition-colors" title="Start Pool">
+                                <Play className="w-4 h-4" />
+                              </button>
+                              <button onClick={async () => {
+                                if (confirm(`Are you sure you want to delete storage pool ${pool.name}?`)) {
+                                  try {
+                                    await apiCall(`/storage/pools/${pool.name}`, { method: 'DELETE' });
+                                    fetchPools();
+                                  } catch (err: any) {
+                                    alert(`Failed to delete storage pool: ${err.message}`);
+                                  }
+                                }
+                              }} className="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete Pool">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </>
                           )}
                         </div>
                       </td>
                     </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
+                    
+                    {expandedPools.has(pool.name) && pool.state === 'active' && (
+                      <tr>
+                        <td colSpan={5} className="p-0 border-b border-slate-200 bg-slate-50">
+                          <div className="pl-12 pr-4 py-4">
+                            <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-3">Volumes in {pool.name}</h4>
+                            
+                            {volumes[pool.name] && volumes[pool.name].length > 0 ? (
+                              <div className="bg-white border border-slate-200 rounded-md overflow-hidden">
+                                <table className="w-full text-sm text-left">
+                                  <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                                    <tr>
+                                      <th className="px-4 py-2 font-medium">Volume Name</th>
+                                      <th className="px-4 py-2 font-medium">Path</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                    {volumes[pool.name].map((vol) => (
+                                      <tr key={vol.name} className="hover:bg-slate-50/50">
+                                        <td className="px-4 py-2">
+                                          <div className="flex items-center gap-2">
+                                            <HardDrive className="w-4 h-4 text-slate-400" />
+                                            <span className="font-medium text-slate-700">{vol.name}</span>
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-2 text-slate-500 font-mono text-xs">{vol.path}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              <div className="text-sm text-slate-500 italic py-2">
+                                No volumes found in this pool.
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          )
+        ) : (
+          disks.length === 0 && !loading ? (
+            <div className="p-12 text-center text-slate-500">
+              <HardDrive className="w-12 h-12 mx-auto mb-4 text-slate-300" />
+              <h3 className="text-lg font-medium text-slate-900 mb-1">No Physical Disks Found</h3>
+              <p className="text-sm">Could not detect any physical storage devices on this node.</p>
+            </div>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Device</th>
+                  <th>Model</th>
+                  <th>Size</th>
+                  <th>Type</th>
+                  <th>Transport</th>
+                  <th className="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {disks.map((disk) => (
+                  <tr key={disk.name}>
+                    <td>
+                      <div className="flex items-center gap-3">
+                        <HardDrive className="w-5 h-5 text-slate-400" />
+                        <div className="font-mono text-sm font-semibold text-sky-600">/dev/{disk.name}</div>
+                      </div>
+                    </td>
+                    <td>
+                      <span className="text-sm text-slate-700">{disk.model}</span>
+                    </td>
+                    <td>
+                      <span className="text-sm font-medium text-slate-900">{disk.size}</span>
+                    </td>
+                    <td>
+                      <span className="badge badge-neutral uppercase text-[10px]">{disk.type}</span>
+                    </td>
+                    <td>
+                      <span className="text-xs text-slate-500 uppercase tracking-wider">{disk.tran}</span>
+                    </td>
+                    <td>
+                      <div className="flex items-center justify-end gap-2">
+                        <button 
+                          onClick={() => {
+                            setSelectedDisk(disk);
+                            setIsFormatModalOpen(true);
+                          }}
+                          className="text-xs font-bold text-rose-600 hover:text-rose-700 px-3 py-1 bg-rose-50 hover:bg-rose-100 rounded-md transition-all uppercase tracking-tighter"
+                        >
+                          Format
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
         )}
       </div>
     </div>

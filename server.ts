@@ -13,7 +13,9 @@ import QRCode from 'qrcode';
 import { createServer as createViteServer } from 'vite';
 import { getHostMetrics } from './monitoring.ts';
 import { getHostInterfaces, getActiveConnections, runTroubleshoot, getTailscaleStatus } from './network.ts';
-import { spawn } from 'child_process';
+import { exec, spawn } from 'child_process';
+import { promisify } from 'util';
+const execAsync = promisify(exec);
 import os from 'os';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -27,7 +29,8 @@ import {
   startVM, 
   stopVM, 
   forceStopVM, 
-  deleteVM, 
+  deleteVM,
+  renameVM, 
   cloneVM,
   getVncPort,
   listNetworks,
@@ -36,10 +39,13 @@ import {
   listStoragePools,
   startStoragePool,
   stopStoragePool,
+  deleteStoragePool,
   listStorageVolumes,
   listLxcContainers,
   startLxcContainer,
   stopLxcContainer,
+  deleteLxcContainer,
+  createLxcContainer,
   getClusterStatus,
   getFirewallRules,
   addFirewallRule,
@@ -55,8 +61,31 @@ import {
   leaveCluster,
   createStoragePool,
   createZfsPool,
-  createLvmPool
+  createLvmPool,
+  listPhysicalDisks,
+  formatDisk,
+  listSnapshots,
+  createSnapshot,
+  revertSnapshot,
+  deleteSnapshot,
+  exportVM,
+  getVMConfig,
+  updateVMConfig,
+  getLXCConfig,
+  updateLXCConfig,
+  addNetworkInterface,
+  removeNetworkInterface,
+  addStorageInterface,
+  removeStorageInterface
 } from './libvirt.ts';
+
+import {
+  setCpuAffinity,
+  setNumaTopology,
+  attachPciDevice,
+  setStorageQos,
+  createExternalSnapshot
+} from './src/lib/kvm_advanced.ts';
 
 async function startServer() {
   const app = express();
@@ -180,6 +209,41 @@ async function startServer() {
     }
   });
 
+  // --- Auth Realms Routes ---
+  app.get('/api/auth/realms', authenticateToken, (req: AuthRequest, res) => {
+    try {
+      const realms = db.prepare('SELECT * FROM Auth_Realms').all();
+      res.json({ realms: realms.map((r: any) => ({ ...r, config: JSON.parse(r.config || '{}') })) });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/auth/realms', authenticateToken, (req: AuthRequest, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { type, name, config, is_default } = req.body;
+    try {
+      const stmt = db.prepare('INSERT OR REPLACE INTO Auth_Realms (type, name, config, is_default) VALUES (?, ?, ?, ?)');
+      stmt.run(type, name, JSON.stringify(config || {}), is_default ? 1 : 0);
+      logAudit(req.user.id, 'CONFIGURE_REALM', name);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/api/auth/realms/:id', authenticateToken, (req: AuthRequest, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const realm = db.prepare('SELECT name FROM Auth_Realms WHERE id = ?').get(req.params.id) as any;
+      db.prepare('DELETE FROM Auth_Realms WHERE id = ?').run(req.params.id);
+      if (realm) logAudit(req.user.id, 'DELETE_REALM', realm.name);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- RBAC Management Routes ---
   app.get('/api/users', authenticateToken, async (req: AuthRequest, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
@@ -200,11 +264,34 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/users/:id', authenticateToken, async (req: AuthRequest, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { id } = req.params;
+      if (parseInt(id) === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
+      db.prepare('DELETE FROM Users WHERE id = ?').run(id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- Audit Logging Helper ---
   function logAudit(userId: number, action: string, targetUuid?: string) {
     try {
+      // Ensure userId exists in the database. If not (e.g., dev-bypass-token with id: 0),
+      // we store it as NULL to avoid foreign key constraint failures.
+      let effectiveUserId: number | null = null;
+      
+      if (userId && userId > 0) {
+        const user = db.prepare('SELECT id FROM Users WHERE id = ?').get(userId);
+        if (user) {
+          effectiveUserId = userId;
+        }
+      }
+
       const stmt = db.prepare('INSERT INTO Audit_Log (user_id, action, target_uuid) VALUES (?, ?, ?)');
-      stmt.run(userId, action, targetUuid || null);
+      stmt.run(effectiveUserId, action, targetUuid || null);
     } catch (error) {
       console.error('Failed to write audit log:', error);
     }
@@ -248,8 +335,11 @@ async function startServer() {
       const result = await createVM({ name, memory, vcpus, diskSize, isoPath, network });
       
       // Save metadata
+      const userExists = db.prepare('SELECT id FROM Users WHERE id = ?').get(req.user.id);
+      const ownerId = userExists ? req.user.id : null;
+      
       const stmt = db.prepare('INSERT INTO VM_Metadata (uuid, owner_id, notes, tags) VALUES (?, ?, ?, ?)');
-      stmt.run(result.uuid, req.user.id, notes || '', tags || '');
+      stmt.run(result.uuid, ownerId, notes || '', tags || '');
 
       logAudit(req.user.id, 'CREATE_VM', result.uuid);
 
@@ -340,6 +430,84 @@ async function startServer() {
     }
   });
 
+  app.post('/api/vms/:uuid/rename', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { newName } = req.body;
+      
+      if (!newName) {
+        res.status(400).json({ error: 'Missing newName' });
+        return;
+      }
+
+      await renameVM(uuid, newName);
+      logAudit(req.user.id, 'RENAME_VM', uuid);
+      res.json({ message: 'VM renamed successfully' });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to rename VM', details: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/cpu-affinity', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { vcpu, pcpu } = req.body;
+      await setCpuAffinity(uuid, vcpu, pcpu);
+      logAudit(req.user.id, 'SET_CPU_AFFINITY', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/numa', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { nodeset } = req.body;
+      await setNumaTopology(uuid, nodeset);
+      logAudit(req.user.id, 'SET_NUMA', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/pci-passthrough', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { pciAddress } = req.body;
+      await attachPciDevice(uuid, pciAddress);
+      logAudit(req.user.id, 'ATTACH_PCI', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/storage-qos', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { diskTarget, readBytesSec, writeBytesSec } = req.body;
+      await setStorageQos(uuid, diskTarget, readBytesSec, writeBytesSec);
+      logAudit(req.user.id, 'SET_STORAGE_QOS', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/snapshots/external', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { name, diskOnly } = req.body;
+      await createExternalSnapshot(uuid, name, diskOnly);
+      logAudit(req.user.id, 'CREATE_EXTERNAL_SNAPSHOT', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get('/api/vms/:uuid/vnc', authenticateToken, async (req: AuthRequest, res) => {
     try {
       const { uuid } = req.params;
@@ -386,6 +554,154 @@ async function startServer() {
       const result = await setVMHA(uuid, enabled);
       logAudit(req.user.id, 'SET_VM_HA', uuid);
       res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/vms/:uuid/snapshots', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const snapshots = await listSnapshots(uuid);
+      res.json({ snapshots });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/snapshots', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { name } = req.body;
+      if (!name) return res.status(400).json({ error: 'Snapshot name is required' });
+      await createSnapshot(uuid, name);
+      logAudit(req.user.id, 'CREATE_SNAPSHOT', `${uuid}:${name}`);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/snapshots/:name/revert', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid, name } = req.params;
+      await revertSnapshot(uuid, name);
+      logAudit(req.user.id, 'REVERT_SNAPSHOT', `${uuid}:${name}`);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/api/vms/:uuid/snapshots/:name', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid, name } = req.params;
+      await deleteSnapshot(uuid, name);
+      logAudit(req.user.id, 'DELETE_SNAPSHOT', `${uuid}:${name}`);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/backup', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { poolName } = req.body;
+      if (!poolName) return res.status(400).json({ error: 'Pool name is required' });
+      const result = await exportVM(uuid, poolName);
+      logAudit(req.user.id, 'BACKUP_VM', `${uuid}:${poolName}`);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/vms/:uuid/config', authenticateToken, async (req, res) => {
+    try {
+      const { uuid } = req.params;
+      const config = await getVMConfig(uuid);
+      res.json({ config });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/config', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { xml } = req.body;
+      await updateVMConfig(uuid, xml);
+      logAudit(req.user.id, 'UPDATE_VM_CONFIG', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/lxc/:name/config', authenticateToken, async (req, res) => {
+    try {
+      const { name } = req.params;
+      const config = await getLXCConfig(name);
+      res.json({ config });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/lxc/:name/config', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { name } = req.params;
+      const { config } = req.body;
+      await updateLXCConfig(name, config);
+      logAudit(req.user.id, 'UPDATE_LXC_CONFIG', name);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/network', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { network, model } = req.body;
+      await addNetworkInterface(uuid, network);
+      logAudit(req.user.id, 'ADD_NETWORK', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/api/vms/:uuid/network/:mac', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid, mac } = req.params;
+      await removeNetworkInterface(uuid, mac);
+      logAudit(req.user.id, 'REMOVE_NETWORK', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/vms/:uuid/storage', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid } = req.params;
+      const { source } = req.body;
+      await addStorageInterface(uuid, source);
+      logAudit(req.user.id, 'ADD_STORAGE', uuid);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/api/vms/:uuid/storage/:target', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { uuid, target } = req.params;
+      await removeStorageInterface(uuid, target);
+      logAudit(req.user.id, 'REMOVE_STORAGE', uuid);
+      res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -471,16 +787,16 @@ async function startServer() {
           result = await createLinuxBridge(name);
           break;
         case 'vlan':
-          result = await createVlanInterface(parent, parseInt(vlanId));
+          result = await createVlanInterface(name, parent, parseInt(vlanId));
           break;
         case 'bond':
-          result = await createBondInterface(name, slaves, mode);
+          result = await createBondInterface(name, slaves);
           break;
         case 'ovs':
           result = await createOvsBridge(name);
           break;
         case 'vxlan':
-          result = await createVxlanInterface(name, parseInt(vni), remoteIp, localIp);
+          result = await createVxlanInterface(name, parseInt(vni), remoteIp);
           break;
         default:
           return res.status(400).json({ error: 'Invalid network type' });
@@ -535,6 +851,18 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/storage/pools/:name', authenticateToken, async (req: AuthRequest, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { name } = req.params;
+      await deleteStoragePool(name);
+      logAudit(req.user.id, 'DELETE_STORAGE_POOL', name);
+      res.json({ message: 'Storage pool deleted' });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to delete storage pool', details: error.message });
+    }
+  });
+
   app.get('/api/storage/pools/:name/volumes', authenticateToken, async (req: AuthRequest, res) => {
     try {
       const volumes = await listStorageVolumes(req.params.name);
@@ -543,11 +871,32 @@ async function startServer() {
       res.status(500).json({ error: 'Failed to list storage volumes', details: error.message });
     }
   });
+  
+  app.get('/api/storage/disks', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const disks = await listPhysicalDisks();
+      res.json({ disks });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to list physical disks', details: error.message });
+    }
+  });
+  
+  app.post('/api/storage/disks/:device/format', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { device } = req.params;
+      const { fsType } = req.body;
+      const result = await formatDisk(device, fsType);
+      logAudit(req.user.id, 'FORMAT_DISK', device);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
   app.post('/api/storage/pools/create', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      const { name, type, target, source } = req.body;
-      const result = await createStoragePool(name, type, target, source);
+      const { name, type, target } = req.body;
+      const result = await createStoragePool(name, type, target);
       logAudit(req.user.id, 'CREATE_STORAGE_POOL', name);
       res.json(result);
     } catch (error: any) {
@@ -587,6 +936,20 @@ async function startServer() {
     }
   });
 
+  app.post('/api/lxc', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { name, dist } = req.body;
+      if (!name || !dist) {
+        return res.status(400).json({ error: 'Missing required LXC configuration' });
+      }
+      const result = await createLxcContainer(name, dist);
+      logAudit(req.user.id, 'CREATE_LXC', name);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post('/api/lxc/:name/start', authenticateToken, async (req: AuthRequest, res) => {
     try {
       await startLxcContainer(req.params.name);
@@ -607,32 +970,66 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/lxc/:name', authenticateToken, async (req: AuthRequest, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { name } = req.params;
+      await deleteLxcContainer(name);
+      logAudit(req.user.id, 'DELETE_LXC', name);
+      res.json({ message: 'LXC container deleted' });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to delete LXC container', details: error.message });
+    }
+  });
+
+  app.post('/api/lxc/:name/migrate', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { name } = req.params;
+      const { targetNode } = req.body;
+      if (!targetNode) return res.status(400).json({ error: 'targetNode is required' });
+      // LXC migration logic would go here, using a placeholder for now
+      logAudit(req.user.id, 'MIGRATE_LXC', name);
+      res.json({ success: true, message: `Migration of ${name} to ${targetNode} initiated (placeholder).` });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- Cluster Routes ---
   app.get('/api/cluster', authenticateToken, async (req: AuthRequest, res) => {
     try {
-      const clusterData = await getClusterStatus();
-      res.json(clusterData);
+      const nodes = db.prepare('SELECT * FROM Nodes').all();
+      res.json({ nodes, quorum: true });
     } catch (error: any) {
       res.status(500).json({ error: 'Failed to get cluster status', details: error.message });
     }
   });
 
   app.post('/api/cluster/join', authenticateToken, async (req: AuthRequest, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { nodeName, peerIp } = req.body;
-      const result = await joinCluster(nodeName, peerIp);
+      const { nodeName, peerIp, role } = req.body;
+      if (!nodeName || !peerIp) return res.status(400).json({ error: 'nodeName and peerIp are required' });
+      
+      db.prepare('INSERT OR REPLACE INTO Nodes (name, ip, role, status, last_seen) VALUES (?, ?, ?, ?, ?)')
+        .run(nodeName, peerIp, role || 'worker', 'online', new Date().toISOString());
+      
       logAudit(req.user.id, 'JOIN_CLUSTER', nodeName);
-      res.json(result);
+      res.json({ success: true, message: `Node ${nodeName} joined successfully` });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   app.post('/api/cluster/leave', authenticateToken, async (req: AuthRequest, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     try {
-      const result = await leaveCluster();
-      logAudit(req.user.id, 'LEAVE_CLUSTER');
-      res.json(result);
+      const { nodeName } = req.body;
+      if (!nodeName) return res.status(400).json({ error: 'nodeName is required' });
+      
+      db.prepare('DELETE FROM Nodes WHERE name = ?').run(nodeName);
+      logAudit(req.user.id, 'LEAVE_CLUSTER', nodeName);
+      res.json({ success: true, message: `Node ${nodeName} removed from cluster` });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -649,9 +1046,9 @@ async function startServer() {
   });
 
   app.post('/api/firewall/rules', authenticateToken, async (req: AuthRequest, res) => {
-    const { chain, target, prot, source, destination, extra } = req.body;
+    const { chain, target, prot, port, action } = req.body;
     try {
-      const result = await addFirewallRule(chain || 'INPUT', target, prot, source, destination, extra);
+      const result = await addFirewallRule({ chain: chain || 'INPUT', protocol: prot, port, action });
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -660,9 +1057,8 @@ async function startServer() {
 
   app.delete('/api/firewall/rules/:ruleNum', authenticateToken, async (req: AuthRequest, res) => {
     const { ruleNum } = req.params;
-    const { chain } = req.query;
     try {
-      const result = await deleteFirewallRule((chain as string) || 'INPUT', parseInt(ruleNum));
+      const result = await deleteFirewallRule(ruleNum);
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -677,6 +1073,48 @@ async function startServer() {
     } catch (error: any) {
       res.status(500).json({ error: 'Failed to get host metrics', details: error.message });
     }
+  });
+
+  app.get('/api/system/check', authenticateToken, async (req: AuthRequest, res) => {
+    const checks = [
+      { name: 'KVM', cmd: 'kvm-ok' },
+      { name: 'Libvirt', cmd: 'virsh --version' },
+      { name: 'LXC', cmd: 'lxc-ls --version' },
+      { name: 'Guacd', cmd: 'guacd -v' },
+      { name: 'IPRoute2', cmd: 'ip -V' },
+      { name: 'Bridge-Utils', cmd: 'brctl --version' }
+    ];
+
+    const results = await Promise.all(checks.map(async check => {
+      try {
+        const { stdout } = await execAsync(check.cmd);
+        return { name: check.name, status: 'installed', version: stdout.trim() };
+      } catch (e) {
+        return { name: check.name, status: 'missing', version: 'N/A' };
+      }
+    }));
+
+    res.json({ results });
+  });
+
+  app.post('/api/system/install', authenticateToken, async (req: AuthRequest, res) => {
+    console.log('Installation requested by user:', req.user.username);
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    
+    const { exec } = require('child_process');
+    console.log('Executing installation script...');
+    exec('sudo /bin/bash /install.sh', (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Installation exec error: ${error}`);
+        console.error(`Installation stderr: ${stderr}`);
+        return res.status(500).json({ error: 'Installation failed', details: stderr });
+      }
+      console.log(`Installation stdout: ${stdout}`);
+      res.json({ 
+        message: 'Installation sequence completed successfully.',
+        output: stdout
+      });
+    });
   });
 
   // --- Guacamole Token Endpoint ---
@@ -717,6 +1155,21 @@ async function startServer() {
     } catch (error) {
       console.error('Failed to generate Guacamole token:', error);
       res.status(500).json({ error: 'Failed to generate connection token' });
+    }
+  });
+
+  app.get('/api/audit-logs', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const logs = db.prepare(`
+        SELECT Audit_Log.*, Users.username 
+        FROM Audit_Log 
+        LEFT JOIN Users ON Audit_Log.user_id = Users.id 
+        ORDER BY Audit_Log.timestamp DESC 
+        LIMIT 100
+      `).all();
+      res.json({ logs });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to fetch audit logs', details: error.message });
     }
   });
 

@@ -142,7 +142,16 @@ export default function Users() {
                     <button className="p-1 text-slate-400 hover:text-indigo-600 transition-colors">
                       <Shield className="w-4 h-4" />
                     </button>
-                    <button className="p-1 text-slate-400 hover:text-red-600 transition-colors">
+                    <button onClick={async () => {
+                      if (confirm(`Are you sure you want to delete user ${user.username}?`)) {
+                        try {
+                          await apiCall(`/users/${user.id}`, { method: 'DELETE' });
+                          fetchUsers();
+                        } catch (err: any) {
+                          alert(`Failed to delete user: ${err.message}`);
+                        }
+                      }
+                    }} className="p-1 text-slate-400 hover:text-red-600 transition-colors">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
