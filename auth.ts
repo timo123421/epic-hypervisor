@@ -1,14 +1,14 @@
 import jwt from 'jsonwebtoken';
-import { Request, Response, NextFunction } from 'express';
+import express from 'express';
 import * as speakeasy from 'speakeasy';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'nova-default-secret-key-change-me';
 
-export interface AuthRequest extends Request {
+export interface AuthRequest extends express.Request {
   user?: any;
 }
 
-export function authenticateToken(req: AuthRequest, res: Response, next: NextFunction) {
+export function authenticateToken(req: AuthRequest, res: express.Response, next: express.NextFunction) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -33,7 +33,7 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
 }
 
 export function authorize(permissions: string[]) {
-  return (req: AuthRequest, res: Response, next: NextFunction) => {
+  return (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
     
     // Admin has all permissions

@@ -36,14 +36,8 @@ if [ "$OS_TYPE" == "debian" ]; then
   systemctl enable --now openvswitch-switch
 elif [ "$OS_TYPE" == "arch" ]; then
   systemctl enable --now libvirtd
-  # Check for available OVS services
-  if systemctl list-unit-files | grep -q "ovs-vswitchd.service"; then
-    systemctl enable --now ovs-vswitchd
-  elif systemctl list-unit-files | grep -q "openvswitch.service"; then
-    systemctl enable --now openvswitch
-  else
-    echo "Warning: Could not find Open vSwitch service. Please check your OVS installation."
-  fi
+  systemctl enable --now ovsdb-server
+  systemctl enable --now ovs-vswitchd
 fi
 
 # Add current user to libvirt group
